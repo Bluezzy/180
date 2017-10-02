@@ -1,0 +1,139 @@
+#! /usr/bin/env ruby
+
+require "pg"
+require "io/console"
+
+class ExpenseData
+  def initialize
+    @connection = PG.connect(dbname: "expenses")
+    setup_schema
+  end
+
+  def display_expenses(expenses)
+    expenses.each do |tuple|
+      columns = [ tuple["id"].rjust(3),
+                  tuple["created_on"].rjust(10),
+                  tuple["amount"].rjust(12),
+                  tuple["memo"] ]
+
+      puts columns.join(" | ")
+    end
+
+    puts "-" * 50
+
+    amount_sum = expenses.field_values("amount").map(&:to_f).inject(:+)
+    puts "Total #{amount_sum.to_s.rjust(25)}"
+  end
+
+  def setup_schema
+    result = @connection.exec <<~SQL
+      SELECT COUNT(*) FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'expenses';
+    SQL
+
+    if result[0]["count"] == "0"
+      @connection.exec <<~SQL
+        CREATE TABLE expenses (
+          id serial PRIMARY KEY,
+          amount numeric(6,2) NOT NULL CHECK (amount >= 0.01),
+          memo text NOT NULL,
+          created_on date NOT NULL
+        );
+      SQL
+    end
+  end
+
+  def list_expenses
+    result = @connection.exec("SELECT * FROM expenses ORDER BY created_on ASC")
+
+    display_count(result)
+    display_expenses(result) if result.count > 0
+  end
+
+  def add_expense(amount,memo)
+    sql = "INSERT INTO expenses (amount, memo, created_on) VALUES ($1, $2, NOW())"
+    @connection.exec_params(sql, [amount, memo])
+  end
+
+  def find(query)
+    sql = "SELECT * FROM expenses WHERE memo ILIKE $1"
+    result = @connection.exec_params(sql, ["#{query}"])
+    display_expenses(result)
+  end
+
+  def valid?(any_id)
+    sql = "SELECT * FROM expenses"
+    data = @connection.exec_params(sql)
+    result = data.field_values("id").map(&:to_i)
+    result.include?(any_id.to_i)
+  end
+
+  def delete(any_id)
+    sql = "DELETE FROM expenses WHERE id = $1"
+    @connection.exec_params(sql, [any_id])
+  end
+
+  def delete_all_expenses
+    sql = "DELETE FROM expenses"
+    @connection.exec_params(sql)
+  end
+
+  def display_count(pg_result)
+    if pg_result.count == 0
+      puts "There are no expenses"
+    else
+      puts "There are #{pg_result.count} expenses"
+    end
+  end
+end
+
+class CLI
+  def initialize
+    @application = ExpenseData.new
+  end
+
+  def run(arguments)
+    command = ARGV.first
+    case command 
+    when "list" 
+      @application.list_expenses
+    when 'add'
+      amount = ARGV[1]
+      memo = ARGV[2]
+      abort "You must provide an amount and memo." unless amount && memo
+      @application.add_expense(amount, memo)
+    when 'search'
+      query = ARGV[1]
+      abort "You must provide a query." unless query
+      @application.find(query)
+    when 'delete'
+      id = ARGV[1]
+      abort "There is no expense with the id '#{id}'" unless @application.valid?(id)
+      @application.delete(id)
+    when 'clear'
+      puts "Are you sure you want to delete everything ? (y/n)"
+      answer = $stdin.getch
+      abort unless answer == 'y'
+      @application.delete_all_expenses
+      puts "All expenses have been deleted."
+    else
+      display_help
+    end
+  end
+
+  def display_help
+    puts <<~HELP
+      An expense recording system
+
+      Commands:
+
+      add AMOUNT MEMO [DATE] - record a new expense
+      clear - delete all expenses
+      list - list all expenses
+      delete NUMBER - remove expense with id NUMBER
+      search QUERY - list expenses with a matching memo field
+    HELP
+  end
+end
+
+CLI.new.run(ARGV)
